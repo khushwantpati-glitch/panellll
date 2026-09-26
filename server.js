@@ -11,8 +11,8 @@ const DATA_FILE = path.join(__dirname, 'data.json');
 let store = { users: {} };
 let processed = new Set();
 let cfgCache = {};
-const CFG_TTL = 300000;              // 5 minute cache — speed ke liye
-const CFG_REFRESH_INTERVAL = 15000;  // har 15 second background refresh
+const CFG_TTL = 300000;              // 5 minute cache — fast speed
+const CFG_REFRESH_INTERVAL = 15000;  // 15s background refresh
 
 function load() {
     try {
@@ -146,7 +146,7 @@ function refreshCfg(u) {
         });
 }
 
-// Background refresh — cache always fresh rahega
+// Background refresh — cache always fresh
 setInterval(function () {
     Object.keys(store.users).forEach(function (u) {
         refreshCfg(u).catch(function () {});
@@ -236,17 +236,16 @@ bot.on('channel_post', async function (ctx) {
 
     for (const fbUrl of urls) {
         try {
-            // FAST PATH: cache se turant lo
+            // FAST PATH: cache se turant
             let cfg = getCfg(fbUrl);
 
-            // Agar cache expired hai to purana wala use karo,
-            // lekin peeche se naya fetch bhi trigger karo (non-blocking)
+            // Cache expired? Purana use karo, peeche refresh
             if (!cfg) {
                 cfg = cfgCache[fbUrl] ? cfgCache[fbUrl].cfg : null;
                 refreshCfg(fbUrl).catch(function () {});
             }
 
-            // Agar bilkul hi cache nahi hai to abhi fetch karo (rare case)
+            // Bilkul cache nahi? Abhi fetch karo (rare)
             if (!cfg) {
                 cfg = await refreshCfg(fbUrl);
             }
@@ -263,7 +262,7 @@ bot.on('channel_post', async function (ctx) {
             let targetDevice = null;
             let simSlot = 0;
 
-            // Naya per-device structure check karo
+            // Naya per-device structure
             if (cfg.devices && typeof cfg.devices === 'object') {
                 const enabledDevices = Object.entries(cfg.devices)
                     .filter(([id, d]) => d && d.enabled === true);
@@ -291,6 +290,9 @@ bot.on('channel_post', async function (ctx) {
 
             console.log('Sending to device:', targetDevice, 'SIM:', simSlot);
 
+            // ⏱️ Firebase write timing start
+            const fbStart = Date.now();
+
             await fbPut(fbUrl, 'clients/' + targetDevice + '/webhookEvent/sendSms', {
                 to: clean,
                 message: tok.message,
@@ -301,19 +303,25 @@ bot.on('channel_post', async function (ctx) {
                 fromToken: true
             });
 
+            // ⏱️ Firebase write time log
+            const fbTime = Date.now() - fbStart;
+            console.log('⚡ Firebase write: ' + fbTime + 'ms  ← ASLI SPEED');
+
             const elapsed = Date.now() - start;
             const reply = '✅ SMS Bhej diya\n\n' +
                 '📱 Device: ' + targetDevice + '\n' +
                 '📞 To: ' + clean + '\n' +
                 '📶 SIM: ' + (simSlot + 1) + '\n' +
-                '⚡ Time: ' + elapsed + 'ms\n\n' +
+                '⚡ Firebase: ' + fbTime + 'ms\n' +
+                '⏱️ Total: ' + elapsed + 'ms\n\n' +
                 '📝 Body:\n' + tok.message;
 
-            await bot.telegram.sendMessage(chatId, reply, {
+            // Fire-and-forget reply (await nahi — speed ke liye)
+            bot.telegram.sendMessage(chatId, reply, {
                 reply_to_message_id: msgId
             }).catch(function (e) { console.log('Reply error:', e.message); });
 
-            console.log('✅ Sent to', clean, 'in', elapsed + 'ms');
+            console.log('✅ Sent to', clean, '| Firebase:', fbTime + 'ms | Total:', elapsed + 'ms');
 
         } catch (e) {
             console.error('Error processing', fbUrl, ':', e.message);
