@@ -17,7 +17,7 @@ const axiosInstance = axios.create({
 
 const PORT = process.env.PORT || 3000;
 const BOT_TOKEN = '8928344876:AAHhu5s2eAsfIQmOLjdjuwy_-JRD0fruwNA';
-const DATA_FILE = path.join(__dirname, 'data.json');
+const DATA_FILE = '/app/data/data.json';
 
 let store = { users: {} };
 let processed = new Set();
