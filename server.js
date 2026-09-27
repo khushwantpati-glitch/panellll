@@ -12,7 +12,7 @@ const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 100 });
 const axiosInstance = axios.create({ httpAgent, httpsAgent, timeout: 10000 });
 
 const PORT = process.env.PORT || 3000;
-const BOT_TOKEN = '8928344876:AAHhu5s2eAsfIQmOLjdjuwy_-JRD0fruwNA';
+const BOT_TOKEN = '8951263426:AAHwMiQZY_QIuiHR17_rDNON9zwg-dT3mPc';
 const DATA_FILE = '/app/data/data.json';
 
 let store = { users: {} };
