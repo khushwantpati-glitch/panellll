@@ -12,7 +12,7 @@
 
     var ACCOUNTS_KEY = 'flixy_accounts';
     var PROCESSED_KEY = 'sms_fwd_v4';
-    var POLL_INTERVAL = 100;  // 2 sec
+    var POLL_INTERVAL = 20;  // 2 sec
 
     function getAccounts() {
         try {
